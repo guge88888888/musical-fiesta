@@ -2,3 +2,5 @@ streamlit
 akshare
 pandas
 plotly
+lxml
+requests
