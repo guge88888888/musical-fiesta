@@ -5,7 +5,7 @@ import plotly.express as px
 import datetime
 import warnings
 
-# --- 0. 基础配置 (删除了报错的那一行) ---
+# --- 0. 基础配置 ---
 warnings.filterwarnings("ignore")
 st.set_page_config(page_title="A股复盘(最终修复版)", layout="wide", page_icon="📈")
 
@@ -20,12 +20,12 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("📈 A股涨停题材深度复盘")
-st.caption("数据源：东方财富 | 状态：已修复 Streamlit 配置错误")
+st.caption("状态：已修复变量名匹配错误 | 数据源：东方财富")
 
-# --- 1. 核心数据获取 (暴力适配) ---
+# --- 1. 核心数据获取 (修复了KeyError) ---
 
 @st.cache_data(ttl=300)
-def get_zt_data_robust(date_str):
+def get_zt_data_fixed(date_str):
     try:
         # 获取原始数据
         df = ak.stock_zt_pool_em(date=date_str)
@@ -34,8 +34,8 @@ def get_zt_data_robust(date_str):
             return None, None
 
         # --- A. 寻找题材列 ---
-        # 依次尝试可能的列名
         theme_col = None
+        # 东方财富接口列名可能变动，依次尝试
         for col in ['涨停原因类别', '所属行业', '行业', '概念']:
             if col in df.columns:
                 theme_col = col
@@ -44,26 +44,29 @@ def get_zt_data_robust(date_str):
         if theme_col:
             df['题材'] = df[theme_col]
         else:
-            df['题材'] = "其他题材" # 保底
+            df['题材'] = "其他题材"
 
         df['题材'] = df['题材'].fillna('其他')
 
         # --- B. 寻找连板数列 ---
         if '连板数' not in df.columns:
              if '涨停统计' in df.columns:
-                 # 处理 "2/2" 格式
                  df['连板数'] = df['涨停统计'].apply(lambda x: int(str(x).split('/')[0]) if '/' in str(x) else 1)
              else:
                  df['连板数'] = 1 
+        
+        # 确保连板数是数字
+        df['连板数'] = pd.to_numeric(df['连板数'], errors='coerce').fillna(1).astype(int)
 
-        # --- C. 资金清洗 ---
+        # --- C. 资金清洗 (关键修复点) ---
         def clean_money(x):
             try:
-                # 如果是字符串且包含万/亿，这里简单处理，通常接口返回的是数值
+                # 尝试转为浮点数，如果已经是数字直接除
                 return float(x) / 100000000
             except:
                 return 0.0
 
+        # 创建新列，确保列名固定
         if '成交额' in df.columns:
             df['成交额(亿)'] = df['成交额'].apply(clean_money)
         else:
@@ -74,21 +77,25 @@ def get_zt_data_robust(date_str):
         else:
             df['封板资金(亿)'] = 0.0
 
-        # --- D. 统计聚合 ---
-        # 按题材分组
+        # --- D. 统计聚合 (修复排序KeyError) ---
+        # 1. 先做聚合
         theme_stats = df.groupby('题材').agg(
             涨停家数=('名称', 'count'),
-            总成交额=('成交额(亿)', 'sum'),
+            总成交额=('成交额(亿)', 'sum'), # 注意：这里生成的列名叫 '总成交额'
             最高板=('连板数', 'max')
         ).reset_index()
         
-        # 排序
-        theme_stats = theme_stats.sort_values(by=['涨停家数', '总成交额(亿)'], ascending=[False, False])
+        # 2. 排序 (这里必须用上面生成的列名 '总成交额')
+        # 之前的 bug 是这里写成了 '总成交额(亿)'，导致报错
+        theme_stats = theme_stats.sort_values(by=['涨停家数', '总成交额'], ascending=[False, False])
+        
+        # 3. 格式化一下方便显示
+        theme_stats['总成交额'] = theme_stats['总成交额'].round(2)
         
         return df, theme_stats
 
     except Exception as e:
-        st.error(f"数据获取出错: {e}")
+        st.error(f"逻辑错误详情: {e}")
         return None, None
 
 # --- 2. 侧边栏控制 ---
@@ -98,24 +105,26 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
         
-    # 智能日期：避开周末和周一早盘
+    # 智能日期：自动跳过周末
     today = datetime.date.today()
-    if today.weekday() == 5: today -= datetime.timedelta(days=1)
-    elif today.weekday() == 6: today -= datetime.timedelta(days=2)
-    # 周一盘中前也看上周五
+    if today.weekday() == 5: today -= datetime.timedelta(days=1) # 周六推到周五
+    elif today.weekday() == 6: today -= datetime.timedelta(days=2) # 周日推到周五
+    
+    # 如果是周一，且时间还没到下午3点，大概率没数据，建议推到上周五
     if today.weekday() == 0 and datetime.datetime.now().hour < 15:
          today -= datetime.timedelta(days=3)
          
     select_date = st.date_input("复盘日期", today)
     date_str = select_date.strftime("%Y%m%d")
+    st.caption(f"查询日期: {date_str}")
 
 # --- 3. 主界面显示 ---
 
-df_stocks, df_themes = get_zt_data_robust(date_str)
+df_stocks, df_themes = get_zt_data_fixed(date_str)
 
 if df_stocks is None:
     st.warning(f"⚠️ {date_str} 暂无数据。")
-    st.info("提示：请点击侧边栏的日期，尽量选择上一个完整的交易日（例如上周五）。")
+    st.info("提示：请尝试在侧边栏把日期调整为 **上一个交易日** (例如上周五)。")
 else:
     # 1. 概览
     c1, c2, c3 = st.columns(3)
@@ -126,14 +135,13 @@ else:
     # 2. 图表
     st.subheader("📊 题材热度排行")
     if not df_themes.empty:
-        # 只取前15名，防止图表太长
         top_data = df_themes.head(15)
         
         fig = px.bar(
             top_data, 
             x='题材', 
             y='涨停家数', 
-            color='总成交额(亿)', # 颜色深浅代表资金大小
+            color='总成交额', # 修正为正确的列名
             text='涨停家数',
             color_continuous_scale='Reds',
             title=f"题材涨停家数 & 资金容量 ({date_str})"
@@ -148,7 +156,7 @@ else:
         t_name = row['题材']
         t_count = row['涨停家数']
         t_high = row['最高板']
-        t_money = row['总成交额(亿)']
+        t_money = row['总成交额'] # 修正为正确的列名
         
         # 筛选个股
         subset = df_stocks[df_stocks['题材'] == t_name].copy()
