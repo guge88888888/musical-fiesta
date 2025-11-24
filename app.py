@@ -44,10 +44,11 @@ def get_sector_fund_flow():
                 return float(s) if s.replace('.','').replace('-','').isdigit() else 0.0
                 
             df['主力净流入(亿)'] = df['今日主力净流入'].apply(convert_unit)
+            # 修复：处理百分比转换，防止非字符串报错
             df['涨跌幅(%)'] = df['今日涨跌幅'].apply(lambda x: float(x.replace('%', '')) if isinstance(x, str) else 0.0)
             return df
     except Exception as e:
-        print(f"资金数据获取失败: {e}") # 打印到后台日志
+        st.error(f"资金数据获取失败，可能是网络超时: {e}") 
         return pd.DataFrame()
 
 @st.cache_data(ttl=600)
@@ -65,7 +66,7 @@ def get_limit_up_pool(date_str):
             valid_cols = [c for c in target_cols if c in df.columns]
             return df[valid_cols]
     except Exception as e:
-        print(f"涨停数据获取失败: {e}")
+        st.error(f"涨停数据获取失败: {e}")
         return pd.DataFrame()
 
 # --- 3. 侧边栏 ---
@@ -76,7 +77,7 @@ with st.sidebar:
         st.rerun()
     
     today = datetime.date.today()
-    # 简单的逻辑：如果是周末，往前推到周五
+    # 简单的逻辑：如果是周末，默认往前推到周五
     if today.weekday() == 5: today -= datetime.timedelta(days=1)
     elif today.weekday() == 6: today -= datetime.timedelta(days=2)
     
@@ -85,6 +86,7 @@ with st.sidebar:
 
 # --- 4. 模块一：资金流向 ---
 st.subheader("📊 主力资金：高低切换监测")
+st.text("数据加载中，请稍候...")
 
 df_fund = get_sector_fund_flow()
 
@@ -105,18 +107,18 @@ if not df_fund.empty:
     fig.add_hline(y=0, line_dash="dash", line_color="gray")
     fig.update_traces(textposition='top center')
     
-    # 修复警告：改用 theme="streamlit" 默认自适应
-    st.plotly_chart(fig, use_container_width=True)
+    # 修复警告：使用 theme="streamlit" 让它自动适应
+    st.plotly_chart(fig, theme="streamlit", use_container_width=True)
     
     with st.expander("查看详细数据表"):
-        # 修复警告：改用 map 替代 applymap
+        # 修复警告：Pandas 2.0+ 使用 map 替代 applymap
         st.dataframe(
             df_fund.sort_values("主力净流入(亿)", ascending=False)
             .style.background_gradient(cmap='RdYlGn', subset=['主力净流入(亿)'])
             .format("{:.2f}", subset=['主力净流入(亿)', '涨跌幅(%)'])
         )
 else:
-    st.warning("⚠️ 资金数据加载失败。原因可能是：\n1. 此时是非交易时间，接口无数据。\n2. 云端服务器 IP 被东方财富暂时限制访问（常见于海外服务器）。")
+    st.warning("⚠️ 资金数据暂时无法获取，可能是盘后接口维护或云端IP限制。请稍后再试。")
 
 # --- 5. 模块二：涨停归因 ---
 st.subheader(f"🔥 涨停归因 ({date_str})")
@@ -133,7 +135,7 @@ if not df_zt.empty:
     # 热点聚合
     if '所属行业' in df_zt.columns:
         top_concepts = df_zt['所属行业'].value_counts().head(10)
-        st.write("🔥 **当前最强板块:** " + " | ".join([f"{k}({v})" for k,v in top_concepts.items()]))
+        st.success("🔥 **当前最强板块:** " + " | ".join([f"{k}({v})" for k,v in top_concepts.items()]))
 
     # 样式处理函数
     def highlight_limit(val):
@@ -142,11 +144,11 @@ if not df_zt.empty:
             return 'color: red; font-weight: bold'
         return ''
 
-    # 修复警告：改用 map
+    # 修复警告：使用 map
     st.dataframe(
         df_zt.style.map(highlight_limit, subset=['涨跌幅']),
         use_container_width=True,
         hide_index=True
     )
 else:
-    st.info(f"📅 {date_str} 暂无涨停数据 (或是数据源暂时无法连接)。")
+    st.info(f"📅 {date_str} 暂无涨停数据。如果是今天，可能数据尚未更新。")
