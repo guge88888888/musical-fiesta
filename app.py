@@ -2,217 +2,196 @@ import streamlit as st
 import akshare as ak
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import datetime
 
-# --- 1. 页面基础设置 ---
-st.set_page_config(page_title="A股深度复盘(题材版)", layout="wide", page_icon="🔥")
-
-# CSS 优化：调整字体和间距，使其更像专业的复盘软件
+# --- 1. 页面配置 ---
+st.set_page_config(page_title="A股复盘(调试增强版)", layout="wide", page_icon="🛠️")
 st.markdown("""
     <style>
-        .block-container {padding-top: 2rem; padding-bottom: 2rem;}
-        div[data-testid="stMetricValue"] {font-size: 18px;}
-        .stExpander {border: 1px solid #f0f2f6; border-radius: 5px;}
+        .block-container {padding-top: 1rem;}
+        .stExpander {border: 1px solid #ddd; border-radius: 5px;}
     </style>
 """, unsafe_allow_html=True)
 
-st.title("🔥 A股涨停题材深度复盘")
-st.caption("逻辑核心：事件驱动归因 -> 题材容量分析 -> 连板梯队排序")
+st.title("🛠️ A股涨停题材复盘 (增强容错版)")
 
-# --- 2. 核心数据获取与处理 ---
+# --- 2. 核心数据处理 ---
 
-@st.cache_data(ttl=600)
-def get_zt_data_processed(date_str):
+@st.cache_data(ttl=300)
+def get_zt_data_robust(date_str):
     """
-    获取涨停数据并进行深加工：清洗、类型转换、分组统计
+    增强版数据获取：自动适配列名，防止空白
     """
+    status_text = st.empty()
     try:
-        with st.spinner(f'正在深度挖掘 {date_str} 的涨停数据...'):
-            df = ak.stock_zt_pool_em(date=date_str)
-            if df is None or df.empty:
-                return pd.DataFrame(), pd.DataFrame()
-            
-            # 1. 字段映射与清洗 (以防接口字段变动)
-            # 确保关键列存在
-            needed_cols = {
-                '代码': '代码', '名称': '名称', '最新价': '最新价', 
-                '涨跌幅': '涨跌幅', '成交额': '成交额', '流通市值': '流通市值',
-                '换手率': '换手率', '连板数': '连板数', '封板资金': '封板资金',
-                '涨停原因类别': '题材' # 核心字段
-            }
-            
-            # 过滤掉不存在的列
-            available_cols = {k: v for k, v in needed_cols.items() if k in df.columns}
-            df = df[list(available_cols.keys())].rename(columns=available_cols)
-            
-            # 2. 数据类型强转 (清洗脏数据)
-            def clean_money(x):
-                # 统一转换为“亿元”
-                if isinstance(x, (int, float)):
-                    return float(x) / 100000000
+        status_text.info(f"正在从东方财富获取 {date_str} 的数据...")
+        
+        # 获取原始数据
+        df = ak.stock_zt_pool_em(date=date_str)
+        
+        if df is None or df.empty:
+            status_text.warning(f"⚠️ 接口返回空数据！请检查 {date_str} 是否为交易日，或当前是否还没出数据。")
+            return pd.DataFrame(), pd.DataFrame()
+
+        # --- 调试关键点：打印原始列名 ---
+        # 如果依然不出图，请截图这行显示的列名给我
+        # st.write(f"🔧 调试信息 - 原始列名: {df.columns.tolist()}")
+
+        # 1. 智能匹配“题材”列
+        # 东方财富有时候叫'涨停原因类别'，有时候叫'所属行业'
+        if '涨停原因类别' in df.columns:
+            df['题材'] = df['涨停原因类别']
+        elif '所属行业' in df.columns:
+            df['题材'] = df['所属行业'] # 降级方案
+        else:
+            # 如果都没有，就给一个默认值，保证程序不崩
+            df['题材'] = '未知题材'
+        
+        # 填充空值
+        df['题材'] = df['题材'].fillna('其他')
+
+        # 2. 智能匹配“连板数”列
+        if '连板数' not in df.columns:
+             # 有时候字段叫 '涨停统计'，里面是 '1/1' 这种格式
+             if '涨停统计' in df.columns:
+                 df['连板数'] = df['涨停统计'].apply(lambda x: int(str(x).split('/')[0]) if '/' in str(x) else 1)
+             else:
+                 df['连板数'] = 1 # 默认设为1
+
+        # 3. 资金清洗
+        def clean_amount(x):
+            try:
+                return float(x) / 100000000
+            except:
                 return 0.0
+        
+        # 优先用成交额，如果没有就用流通市值估算
+        if '成交额' in df.columns:
+            df['成交额(亿)'] = df['成交额'].apply(clean_amount)
+        elif '流通市值' in df.columns and '换手率' in df.columns:
+             # 估算：流通市值 * 换手率 / 100
+             df['成交额(亿)'] = (pd.to_numeric(df['流通市值'], errors='coerce') * pd.to_numeric(df['换手率'], errors='coerce') / 100).apply(clean_amount)
+        else:
+            df['成交额(亿)'] = 0.0
 
-            if '成交额' in df.columns:
-                df['成交额(亿)'] = df['成交额'].apply(clean_money)
-            
-            if '封板资金' in df.columns:
-                df['封板资金(亿)'] = df['封板资金'].apply(clean_money)
+        if '封板资金' in df.columns:
+            df['封板资金(亿)'] = df['封板资金'].apply(clean_amount)
+        else:
+            df['封板资金(亿)'] = 0.0
 
-            # 连板数转整数
-            df['连板数'] = pd.to_numeric(df['连板数'], errors='coerce').fillna(1).astype(int)
-
-            # 3. 题材聚合统计
-            if '题材' in df.columns:
-                # 填充空题材
-                df['题材'] = df['题材'].fillna("其他")
-                
-                # 聚合计算
-                theme_stats = df.groupby('题材').agg(
-                    涨停家数=('名称', 'count'),
-                    总成交额=('成交额(亿)', 'sum'),
-                    平均连板=('连板数', 'mean'),
-                    高标高度=('连板数', 'max')
-                ).reset_index()
-                
-                # 计算占比
-                total_zt = len(df)
-                theme_stats['家数占比(%)'] = (theme_stats['涨停家数'] / total_zt * 100).round(1)
-                theme_stats['总成交额(亿)'] = theme_stats['总成交额(亿)'].round(2)
-                
-                # 排序：默认按家数降序，家数一样按金额降序
-                theme_stats = theme_stats.sort_values(by=['涨停家数', '总成交额(亿)'], ascending=[False, False])
-                
-                return df, theme_stats
-            else:
-                return df, pd.DataFrame()
+        # 4. 聚合统计 (生成 df_themes)
+        theme_stats = df.groupby('题材').agg(
+            涨停家数=('名称', 'count'),
+            总成交额=('成交额(亿)', 'sum'),
+            最高板=('连板数', 'max')
+        ).reset_index()
+        
+        # 增加占比
+        theme_stats['占比'] = (theme_stats['涨停家数'] / len(df) * 100).round(1)
+        theme_stats['总成交额(亿)'] = theme_stats['总成交额(亿)'].round(2)
+        
+        # 排序
+        theme_stats = theme_stats.sort_values(by=['涨停家数', '总成交额(亿)'], ascending=[False, False])
+        
+        status_text.success("数据加载成功！")
+        return df, theme_stats
 
     except Exception as e:
-        st.error(f"数据处理发生错误: {e}")
+        status_text.error(f"数据处理报错: {e}")
+        st.exception(e) # 打印详细报错堆栈
         return pd.DataFrame(), pd.DataFrame()
 
 # --- 3. 侧边栏 ---
 with st.sidebar:
-    st.header("🎮 复盘控制台")
-    today = datetime.date.today()
-    # 自动调整到最近的交易日（简单逻辑）
-    if today.weekday() == 5: today -= datetime.timedelta(days=1)
-    elif today.weekday() == 6: today -= datetime.timedelta(days=2)
-    
-    select_date = st.date_input("复盘日期", today)
-    date_str = select_date.strftime("%Y%m%d")
-    
-    if st.button("🔄 刷新最新数据"):
+    st.header("🎮 控制面板")
+    if st.button("🔄 强制刷新"):
         st.cache_data.clear()
         st.rerun()
         
-    st.info("💡 **说明**：\n数据来源：东方财富\n逻辑：基于【涨停原因类别】进行题材归因，并统计资金容量。")
+    # 默认选上一个交易日（避免今天还没开盘就没数据）
+    default_date = datetime.date.today()
+    if default_date.weekday() == 0: # 周一选上周五
+         default_date -= datetime.timedelta(days=3)
+    elif default_date.weekday() == 6: # 周日选周五
+         default_date -= datetime.timedelta(days=2)
+    elif default_date.weekday() == 5: # 周六选周五
+         default_date -= datetime.timedelta(days=1)
+    
+    select_date = st.date_input("选择日期", default_date)
+    date_str = select_date.strftime("%Y%m%d")
 
-# --- 4. 主界面逻辑 ---
+# --- 4. 主页面显示 ---
 
-df_stocks, df_themes = get_zt_data_processed(date_str)
+# 获取数据
+df_stocks, df_themes = get_zt_data_robust(date_str)
 
 if df_stocks.empty:
-    st.warning(f"⚠️ {date_str} 暂无数据。如果是交易日，请在收盘后（15:30后）查看完整数据。")
+    st.error("❌ 当前没有数据。请尝试：\n1. 点击侧边栏“强制刷新”\n2. 切换日期（尽量选最近的一个交易日，如上周五）")
 else:
-    # === 第一部分：全局概览 ===
-    st.subheader("1. 市场情绪概览")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("🔥 今日涨停总数", f"{len(df_stocks)} 家")
-    c2.metric("💰 涨停股总成交", f"{df_stocks['成交额(亿)'].sum():.1f} 亿")
-    c3.metric("🚀 最高连板", f"{df_stocks['连板数'].max()} 板")
-    # 计算首板占比
-    first_board = len(df_stocks[df_stocks['连板数']==1])
-    c4.metric("🌱 首板占比", f"{first_board/len(df_stocks)*100:.0f}%")
+    # 调试显示：如果图表还不出来，看这里是否列出了题材
+    # st.write("前5个题材预览:", df_themes.head(5))
 
-    # === 第二部分：图表可视化 ===
+    # === 第一部分：概览 ===
+    col1, col2, col3 = st.columns(3)
+    col1.metric("📌 涨停总数", f"{len(df_stocks)}")
+    col2.metric("💰 涨停总金额", f"{df_stocks['成交额(亿)'].sum():.1f} 亿")
+    col3.metric("🚀 空间高度", f"{df_stocks['连板数'].max()} 板")
+
+    # === 第二部分：图表 (确保有数据才画图) ===
     st.subheader("2. 题材热度与资金流向")
     
     if not df_themes.empty:
-        # 只展示前15个大题材，避免图表太拥挤
-        top_themes = df_themes.head(15)
+        # 取前15个
+        top_plot = df_themes.head(15)
         
-        col_chart1, col_chart2 = st.columns(2)
-        
-        with col_chart1:
-            st.markdown("**📊 题材热度排行 (涨停家数)**")
-            fig1 = px.bar(
-                top_themes, 
-                x='题材', 
-                y='涨停家数', 
-                color='涨停家数',
-                text='涨停家数',
-                color_continuous_scale='OrRd',
-                hover_data=['家数占比(%)']
-            )
-            fig1.update_layout(xaxis_tickangle=-45)
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("##### 🔥 题材家数排行")
+            fig1 = px.bar(top_plot, x='题材', y='涨停家数', text='涨停家数', color='涨停家数', color_continuous_scale='Reds')
             st.plotly_chart(fig1, use_container_width=True)
-            
-        with col_chart2:
-            st.markdown("**💰 题材吸金排行 (总成交额)**")
-            fig2 = px.bar(
-                top_themes, 
-                x='题材', 
-                y='总成交额(亿)', 
-                color='总成交额(亿)',
-                text='总成交额(亿)',
-                color_continuous_scale='Viridis', # 资金用冷色调区分
-            )
-            fig2.update_layout(xaxis_tickangle=-45)
+        
+        with c2:
+            st.markdown("##### 💰 题材金额排行")
+            fig2 = px.bar(top_plot, x='题材', y='总成交额(亿)', text='总成交额(亿)', color='总成交额(亿)', color_continuous_scale='Blues')
             st.plotly_chart(fig2, use_container_width=True)
+    else:
+        st.warning("⚠️ 题材统计为空，可能是由于无法识别'题材'列。")
 
-    # === 第三部分：题材详细归因 (核心功能) ===
+    # === 第三部分：详细列表 ===
     st.subheader("3. 题材梯队深度解析")
-    st.markdown("👇 **点击题材标题**，查看该题材下的龙头梯队与资金分布")
-
-    # 遍历题材数据
-    for index, row in df_themes.iterrows():
-        theme_name = row['题材']
-        count = row['涨停家数']
-        money = row['总成交额(亿)']
-        high_board = row['高标高度']
-        
-        # 筛选出属于该题材的个股
-        # 注意：这里做简单的字符串匹配，因为东方财富的归类已经是聚合过的
-        # 如果你想做更模糊的匹配，可以使用 str.contains
-        subset = df_stocks[df_stocks['题材'] == theme_name].copy()
-        
-        # *** 关键：按连板数降序排序 ***
-        subset = subset.sort_values(by=['连板数', '封板资金(亿)'], ascending=[False, False])
-        
-        # 定义 Expander 的标题格式
-        # 格式：[题材名] 🔥5家 | 💰20.5亿 | 🚀最高5板
-        title = f"【{theme_name}】 🔥 {count}家 ({row['家数占比(%)']}%) | 💰 {money}亿 | 🚀 最高 {high_board}板"
-        
-        with st.expander(title):
-            # 高亮样式
-            def highlight_leader(s):
-                is_leader = s['连板数'] == high_board
-                color = '#ffebee' if is_leader else '' # 浅红色背景高亮龙头
-                return [f'background-color: {color}' for _ in s]
-
-            # 展示数据表
-            # 选取展示的列
-            display_cols = ['代码', '名称', '最新价', '涨跌幅', '连板数', '成交额(亿)', '封板资金(亿)', '换手率']
-            valid_disp_cols = [c for c in display_cols if c in subset.columns]
+    
+    # 再次检查 df_themes
+    if df_themes.empty:
+        st.error("题材列表为空。")
+    else:
+        for idx, row in df_themes.iterrows():
+            t_name = row['题材']
+            t_count = row['涨停家数']
+            t_money = row['总成交额(亿)']
+            t_high = row['最高板']
             
-            st.dataframe(
-                subset[valid_disp_cols].style
-                .format({'成交额(亿)': '{:.2f}', '封板资金(亿)': '{:.2f}', '最新价': '{:.2f}'})
-                .apply(highlight_leader, axis=1), # 高亮龙头
-                use_container_width=True,
-                hide_index=True
-            )
+            # 筛选该题材个股
+            subset = df_stocks[df_stocks['题材'] == t_name].copy()
+            # 排序：板数高 -> 封单大
+            subset = subset.sort_values(by=['连板数', '封板资金(亿)'], ascending=[False, False])
+            
+            # 标题
+            label = f"【{t_name}】 🔥{t_count}家 | 💰{t_money}亿 | 🚀最高{t_high}板"
+            
+            with st.expander(label):
+                # 准备展示的列
+                cols_to_show = ['代码', '名称', '最新价', '涨跌幅', '连板数', '成交额(亿)', '封板资金(亿)']
+                # 过滤有效列
+                final_cols = [c for c in cols_to_show if c in subset.columns]
+                
+                # 高亮龙头逻辑
+                def highlight_top(s):
+                    if s['连板数'] == t_high and t_high > 1:
+                        return ['background-color: #ffebee'] * len(s)
+                    return [''] * len(s)
 
-    # === 第四部分：全部数据查询 ===
-    st.markdown("---")
-    with st.expander("🔎 查看当日全部涨停明细 (支持搜索)"):
-        search = st.text_input("输入股票代码或名称搜索:", "")
-        df_display = df_stocks.copy()
-        if search:
-            df_display = df_display[df_display['名称'].str.contains(search) | df_display['代码'].str.contains(search)]
-        
-        st.dataframe(
-            df_display.sort_values("连板数", ascending=False), 
-            use_container_width=True
-        )
+                st.dataframe(
+                    subset[final_cols].style.apply(highlight_top, axis=1).format("{:.2f}", subset=['成交额(亿)', '封板资金(亿)']),
+                    use_container_width=True,
+                    hide_index=True
+                )
