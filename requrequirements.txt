@@ -1,6 +1,4 @@
 streamlit
-akshare
+akshare>=1.10.0
 pandas
 plotly
-lxml
-requests
